@@ -106,6 +106,7 @@
       ansible.builtin.stat:
         path: /etc/ssh/sshd_config
         get_checksum: false
+      register: sshd_config_stat
       tags: [ssh, cis_5.1.1]
 
     - name: "CIS 5.1.1 | Permissions on sshd_config are secure"
