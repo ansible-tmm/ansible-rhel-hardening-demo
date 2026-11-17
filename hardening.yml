@@ -1,0 +1,187 @@
+---
+# RHEL 9 server hardening baseline.
+# Companion content for the "RHEL Hardening" video series:
+#   Part 1: building this playbook with AI + Ansible DevTools (VS Code)
+#   Part 2: running it as policy in Ansible Automation Platform
+#
+# Tags map each task to its CIS Red Hat Enterprise Linux 9 Benchmark
+# v2.0.0 control number, so runs can be scoped per control:
+#   ansible-playbook hardening.yml --tags cis_5.1.20
+#
+# Scope: four areas (SSH, firewalld, password policies, unneeded services).
+# These are demo defaults (roughly CIS L1 Server intent). Review every value
+# against your own environment and benchmark version before using for real.
+
+- name: Apply baseline hardening to RHEL 9 hosts
+  hosts: all
+  become: true
+  gather_facts: true
+
+  vars:
+    # SSH settings (written as a drop-in under /etc/ssh/sshd_config.d/)
+    hardening_ssh_ciphers:
+      - aes256-gcm@openssh.com
+      - aes128-gcm@openssh.com
+      - aes256-ctr
+      - aes128-ctr
+    hardening_ssh_client_alive_interval: 300
+    hardening_ssh_client_alive_count_max: 2
+    hardening_ssh_max_auth_tries: 4
+    hardening_ssh_permit_root_login: "no"
+
+    # Password quality (pam_pwquality drop-in)
+    hardening_pw_minlen: 14
+    hardening_pw_minclass: 3
+    hardening_pw_maxrepeat: 3
+
+    # Password aging (login.defs)
+    hardening_pass_max_days: 365
+    hardening_pass_min_days: 7
+    hardening_pass_warn_age: 7
+
+    # Services to stop and disable
+    hardening_services_disabled:
+      - cups
+      - avahi-daemon
+
+  pre_tasks:
+    - name: Fail early if target is not an EL 9 host
+      ansible.builtin.assert:
+        that:
+          - ansible_facts['os_family'] == "RedHat"
+          - ansible_facts['distribution_major_version'] | int == 9
+        fail_msg: >-
+          This playbook targets RHEL 9 (and EL9 rebuilds). Found
+          {{ ansible_facts['distribution'] }} {{ ansible_facts['distribution_version'] }}.
+        quiet: true
+      tags: always
+
+  handlers:
+    - name: Restart sshd
+      ansible.builtin.service:
+        name: sshd
+        state: restarted
+
+  tasks:
+    # ------------------------------------------------------------------
+    # 1. SSH hardening (CIS RHEL 9 v2.0.0, section 5.1)
+    # ------------------------------------------------------------------
+    - name: "CIS 5.1.1 | Secure permissions on /etc/ssh/sshd_config"
+      ansible.builtin.file:
+        path: /etc/ssh/sshd_config
+        owner: root
+        group: root
+        mode: "0600"
+      tags: [ssh, cis_5.1.1]
+
+    - name: "CIS 5.1.4/5.1.9/5.1.20 | Deploy hardened sshd drop-in configuration"
+      ansible.builtin.copy:
+        dest: /etc/ssh/sshd_config.d/00-hardening.conf
+        owner: root
+        group: root
+        mode: "0600"
+        content: |
+          # Managed by Ansible. Drop-ins are included at the top of
+          # /etc/ssh/sshd_config, so these values take precedence.
+          PermitRootLogin {{ hardening_ssh_permit_root_login }}
+          PasswordAuthentication no
+          Ciphers {{ hardening_ssh_ciphers | join(',') }}
+          ClientAliveInterval {{ hardening_ssh_client_alive_interval }}
+          ClientAliveCountMax {{ hardening_ssh_client_alive_count_max }}
+          MaxAuthTries {{ hardening_ssh_max_auth_tries }}
+        validate: /usr/sbin/sshd -t -f %s
+      notify: Restart sshd
+      # PasswordAuthentication is not a numbered CIS v2.0.0 control on
+      # RHEL 9, but it complements 5.1.20 and matches common baselines.
+      tags: [ssh, cis_5.1.4, cis_5.1.9, cis_5.1.20]
+
+    # ------------------------------------------------------------------
+    # 2. Firewalld (CIS RHEL 9 v2.0.0, section 4.2)
+    #    Goal: SSH allowed, everything else inbound dropped.
+    # ------------------------------------------------------------------
+    - name: "CIS 4.2 | Ensure firewalld is installed"
+      ansible.builtin.dnf:
+        name: firewalld
+        state: present
+      tags: [firewall]
+
+    - name: "CIS 4.2 | Ensure firewalld is enabled and running"
+      ansible.builtin.service:
+        name: firewalld
+        state: started
+        enabled: true
+      tags: [firewall]
+
+    - name: "CIS 4.2.1 | Ensure SSH service is allowed in the public zone"
+      ansible.posix.firewalld:
+        zone: public
+        service: ssh
+        permanent: true
+        immediate: true
+        state: enabled
+      tags: [firewall, cis_4.2.1]
+
+    - name: "CIS 4.2.1 | Remove unnecessary services from the public zone"
+      ansible.posix.firewalld:
+        zone: public
+        service: "{{ item }}"
+        permanent: true
+        immediate: true
+        state: disabled
+      loop:
+        - cockpit
+      tags: [firewall, cis_4.2.1]
+
+    - name: "CIS 4.2.1 | Set public zone target to DROP (default deny inbound)"
+      ansible.posix.firewalld:
+        zone: public
+        target: DROP
+        permanent: true
+        immediate: true
+        state: present
+      tags: [firewall, cis_4.2.1]
+
+    # ------------------------------------------------------------------
+    # 3. Password policies (CIS RHEL 9 v2.0.0, sections 5.3 and 5.4)
+    # ------------------------------------------------------------------
+    - name: "CIS 5.3.3.2 | Deploy password quality drop-in (pam_pwquality)"
+      ansible.builtin.copy:
+        dest: /etc/security/pwquality.d/99-hardening.conf
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          # Managed by Ansible. Password quality requirements.
+          minlen = {{ hardening_pw_minlen }}
+          minclass = {{ hardening_pw_minclass }}
+          maxrepeat = {{ hardening_pw_maxrepeat }}
+      tags: [password_policy, cis_5.3.3.2.2, cis_5.3.3.2.3, cis_5.3.3.2.4]
+
+    - name: "CIS 5.4.1 | Set password aging policy in login.defs"
+      ansible.builtin.lineinfile:
+        path: /etc/login.defs
+        regexp: "^{{ item.key }}\\s+"
+        line: "{{ item.key }} {{ item.value }}"
+        state: present
+      loop:
+        - key: PASS_MAX_DAYS
+          value: "{{ hardening_pass_max_days }}"
+        - key: PASS_MIN_DAYS
+          value: "{{ hardening_pass_min_days }}"
+        - key: PASS_WARN_AGE
+          value: "{{ hardening_pass_warn_age }}"
+      tags: [password_policy, cis_5.4.1.1, cis_5.4.1.2, cis_5.4.1.3]
+
+    # ------------------------------------------------------------------
+    # 4. Disable unneeded services (CIS RHEL 9 v2.0.0, section 2.1)
+    #    The benchmark prefers removal (dnf absent); stop+disable keeps
+    #    the demo reversible.
+    # ------------------------------------------------------------------
+    - name: "CIS 2.1 | Disable and stop unneeded services"
+      ansible.builtin.service:
+        name: "{{ item }}"
+        state: stopped
+        enabled: false
+      loop: "{{ hardening_services_disabled }}"
+      failed_when: false
+      tags: [services, cis_2.1.2, cis_2.1.11]

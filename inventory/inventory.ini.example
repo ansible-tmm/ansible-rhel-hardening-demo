@@ -1,0 +1,8 @@
+# Copy to inventory.ini and fill in your hosts.
+# Both playbooks need become, so a sudo-capable user is assumed.
+[rhel9]
+rhel9-node1 ansible_host=192.0.2.10 ansible_user=ansible
+rhel9-node2 ansible_host=192.0.2.11 ansible_user=ansible
+
+[rhel9:vars]
+ansible_python_interpreter=auto_silent

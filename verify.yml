@@ -1,0 +1,259 @@
+---
+# Read-only audit for the RHEL 9 hardening baseline.
+# Mirrors every control tagged in hardening.yml (CIS RHEL 9 v2.0.0) and
+# reports PASS/FAIL per control. Changes nothing: every check is read-only,
+# so this playbook can run on a schedule for drift detection.
+#
+#   ansible-playbook verify.yml
+#   ansible-playbook verify.yml --tags cis_5.1.20   (single control)
+#
+# Exit code is non-zero if any checked control fails.
+
+- name: Verify RHEL 9 CIS hardening baseline (read-only)
+  hosts: all
+  become: true
+  gather_facts: true
+
+  vars:
+    # Must match the values in hardening.yml
+    hardening_ssh_ciphers:
+      - aes256-gcm@openssh.com
+      - aes128-gcm@openssh.com
+      - aes256-ctr
+      - aes128-ctr
+    hardening_ssh_client_alive_interval: 300
+    hardening_ssh_client_alive_count_max: 2
+    hardening_pass_max_days: 365
+    hardening_pass_min_days: 7
+    hardening_pass_warn_age: 7
+    hardening_pw_minlen: 14
+    hardening_pw_minclass: 3
+    hardening_pw_maxrepeat: 3
+    hardening_public_zone_services_expected:
+      - ssh
+    hardening_services_disabled:
+      - cups
+      - avahi-daemon
+
+  pre_tasks:
+    - name: Fail early if target is not an EL 9 host
+      ansible.builtin.assert:
+        that:
+          - ansible_facts['os_family'] == "RedHat"
+          - ansible_facts['distribution_major_version'] | int == 9
+        fail_msg: >-
+          This playbook targets RHEL 9 (and EL9 rebuilds). Found
+          {{ ansible_facts['distribution'] }} {{ ansible_facts['distribution_version'] }}.
+        quiet: true
+      tags: always
+
+    - name: Initialize the results list
+      ansible.builtin.set_fact:
+        cis_results: []
+      tags: always
+
+  tasks:
+    # ---------------- SSH (CIS section 5.1) ----------------
+    - name: SSH | Read effective sshd configuration
+      ansible.builtin.command: sshd -T
+      changed_when: false
+      check_mode: false
+      register: sshd_effective
+      tags: [ssh, cis_5.1.1, cis_5.1.4, cis_5.1.9, cis_5.1.20]
+
+    - name: "CIS 5.1.20 | Root login over SSH is disabled"
+      ansible.builtin.set_fact:
+        cis_results: "{{ cis_results + [check] }}"
+      vars:
+        check:
+          control: "5.1.20"
+          description: "sshd PermitRootLogin is disabled"
+          passed: "{{ sshd_effective.stdout is search('(?m)^permitrootlogin no$') }}"
+      tags: [ssh, cis_5.1.20]
+
+    - name: "CIS 5.1.4 | sshd uses only approved ciphers"
+      ansible.builtin.set_fact:
+        cis_results: "{{ cis_results + [check] }}"
+      vars:
+        effective_ciphers: >-
+          {{ (sshd_effective.stdout
+              | regex_search('(?m)^ciphers (.+)$', '\\1')
+              | default('')) | trim }}
+        check:
+          control: "5.1.4"
+          description: "sshd ciphers match the approved list"
+          passed: "{{ effective_ciphers.split(',') | map('trim') | list | sort
+                      == hardening_ssh_ciphers | sort }}"
+      tags: [ssh, cis_5.1.4]
+
+    - name: "CIS 5.1.9 | SSH idle timeout is configured"
+      ansible.builtin.set_fact:
+        cis_results: "{{ cis_results + [check] }}"
+      vars:
+        check:
+          control: "5.1.9"
+          description: >-
+            ClientAliveInterval {{ hardening_ssh_client_alive_interval }} and
+            ClientAliveCountMax {{ hardening_ssh_client_alive_count_max }}
+          passed: >-
+            {{ sshd_effective.stdout is search('(?m)^clientaliveinterval '
+                ~ hardening_ssh_client_alive_interval ~ '$')
+               and sshd_effective.stdout is search('(?m)^clientalivecountmax '
+                ~ hardening_ssh_client_alive_count_max ~ '$') }}
+      tags: [ssh, cis_5.1.9]
+
+    - name: "CIS 5.1.1 | Read sshd_config permissions"
+      ansible.builtin.stat:
+        path: /etc/ssh/sshd_config
+        get_checksum: false
+      tags: [ssh, cis_5.1.1]
+
+    - name: "CIS 5.1.1 | Permissions on sshd_config are secure"
+      ansible.builtin.set_fact:
+        cis_results: "{{ cis_results + [check] }}"
+      vars:
+        check:
+          control: "5.1.1"
+          description: "/etc/ssh/sshd_config is mode 0600, owned by root"
+          passed: >-
+            {{ sshd_config_stat.stat.mode == '0600'
+               and sshd_config_stat.stat.uid == 0 }}
+      tags: [ssh, cis_5.1.1]
+
+    # ---------------- Firewalld (CIS section 4.2) ----------------
+    - name: "CIS 4.2.1 | Read firewalld public zone configuration"
+      ansible.builtin.command: "firewall-cmd --permanent --zone=public {{ item }}"
+      changed_when: false
+      check_mode: false
+      failed_when: false
+      loop:
+        - --list-services
+        - --get-target
+      loop_control:
+        label: "{{ item }}"
+      register: firewalld_public
+      tags: [firewall, cis_4.2.1]
+
+    - name: "CIS 4.2.1 | Public zone allows SSH only and drops the rest"
+      ansible.builtin.set_fact:
+        cis_results: "{{ cis_results + [check] }}"
+      vars:
+        zone_services: "{{ (firewalld_public.results[0].stdout | default(''))
+                            | split(',') | map('trim') | list | sort }}"
+        zone_target: "{{ firewalld_public.results[1].stdout | default('') | trim }}"
+        check:
+          control: "4.2.1"
+          description: >-
+            public zone: target DROP, only SSH allowed
+            (services={{ zone_services }}, target={{ zone_target }})
+          passed: >-
+            {{ firewalld_public.results[0].rc == 0
+               and zone_services == hardening_public_zone_services_expected
+               and zone_target == 'DROP' }}
+      tags: [firewall, cis_4.2.1]
+
+    # ---------------- Password policies (CIS sections 5.3, 5.4) ----------------
+    - name: "CIS 5.3.3.2 | Read password quality drop-in"
+      ansible.builtin.command:
+        cmd: grep -E "^(minlen|minclass|maxrepeat)\s*=" /etc/security/pwquality.d/99-hardening.conf
+      changed_when: false
+      check_mode: false
+      failed_when: false
+      register: pwquality_check
+      tags: [password_policy, cis_5.3.3.2]
+
+    - name: "CIS 5.3.3.2 | Password quality requirements are configured"
+      ansible.builtin.set_fact:
+        cis_results: "{{ cis_results + [check] }}"
+      vars:
+        check:
+          control: "5.3.3.2"
+          description: >-
+            pwquality: minlen={{ hardening_pw_minlen }},
+            minclass={{ hardening_pw_minclass }},
+            maxrepeat={{ hardening_pw_maxrepeat }}
+          passed: >-
+            {{ pwquality_check.rc == 0
+               and pwquality_check.stdout is search('(?m)^minlen\s*=\s*'
+                    ~ hardening_pw_minlen ~ '$')
+               and pwquality_check.stdout is search('(?m)^minclass\s*=\s*'
+                    ~ hardening_pw_minclass ~ '$')
+               and pwquality_check.stdout is search('(?m)^maxrepeat\s*=\s*'
+                    ~ hardening_pw_maxrepeat ~ '$') }}
+      tags: [password_policy, cis_5.3.3.2]
+
+    - name: "CIS 5.4.1 | Read password aging settings from login.defs"
+      ansible.builtin.command:
+        cmd: grep -E "^(PASS_MAX_DAYS|PASS_MIN_DAYS|PASS_WARN_AGE)\s+" /etc/login.defs
+      changed_when: false
+      check_mode: false
+      failed_when: false
+      register: logindefs_check
+      tags: [password_policy, cis_5.4.1]
+
+    - name: "CIS 5.4.1 | Password aging policy is configured"
+      ansible.builtin.set_fact:
+        cis_results: "{{ cis_results + [check] }}"
+      vars:
+        check:
+          control: "5.4.1"
+          description: >-
+            login.defs: max={{ hardening_pass_max_days }},
+            min={{ hardening_pass_min_days }},
+            warn={{ hardening_pass_warn_age }}
+          passed: >-
+            {{ logindefs_check.rc == 0
+               and logindefs_check.stdout is search('(?m)^PASS_MAX_DAYS\s+'
+                    ~ hardening_pass_max_days ~ '$')
+               and logindefs_check.stdout is search('(?m)^PASS_MIN_DAYS\s+'
+                    ~ hardening_pass_min_days ~ '$')
+               and logindefs_check.stdout is search('(?m)^PASS_WARN_AGE\s+'
+                    ~ hardening_pass_warn_age ~ '$') }}
+      tags: [password_policy, cis_5.4.1]
+
+    # ---------------- Services (CIS section 2.1) ----------------
+    # service_facts reports each unit's status (enabled, disabled, masked...).
+    # Units that don't exist on the host are simply absent from the facts,
+    # which counts as a pass, same as systemctl's not-found.
+    - name: "CIS 2.1 | Gather service unit states"
+      ansible.builtin.service_facts:
+      tags: [services, cis_2.1]
+
+    - name: "CIS 2.1 | Unneeded services are disabled"
+      ansible.builtin.set_fact:
+        cis_results: "{{ cis_results + [check] }}"
+      vars:
+        services_map: "{{ ansible_facts.services | default({}) }}"
+        unit_status: "{{ services_map.get(item, services_map.get(item ~ '.service', {}))
+                         .get('status', 'not-found') }}"
+        check:
+          control: "2.1"
+          description: "{{ item }} is not enabled (status: {{ unit_status }})"
+          passed: "{{ unit_status in ['disabled', 'masked', 'not-found'] }}"
+      loop: "{{ hardening_services_disabled }}"
+      loop_control:
+        label: "{{ item }}"
+      tags: [services, cis_2.1]
+
+    # ---------------- Summary ----------------
+    - name: Report per-control results
+      ansible.builtin.debug:
+        msg: >-
+          {{ 'PASS' if item.passed | bool else 'FAIL' }}
+          | CIS {{ item.control }}
+          | {{ item.description }}
+      loop: "{{ cis_results }}"
+      loop_control:
+        label: "CIS {{ item.control }}"
+      tags: always
+
+    - name: Fail if any control failed
+      ansible.builtin.assert:
+        that:
+          - cis_results | selectattr('passed', 'equalto', false) | list | length == 0
+        success_msg: "All {{ cis_results | length }} checked controls pass."
+        fail_msg: >-
+          Failed controls: {{ cis_results
+            | selectattr('passed', 'equalto', false)
+            | map(attribute='control') | join(', ') }}
+      tags: always

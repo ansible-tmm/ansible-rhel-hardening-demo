@@ -1,0 +1,7 @@
+# Local inventory holds real host IPs and credentials references
+inventory/inventory.ini
+*.retry
+
+# Galaxy collections installed locally
+collections/
+galaxy_cache/
