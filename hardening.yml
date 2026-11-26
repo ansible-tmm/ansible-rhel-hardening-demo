@@ -62,6 +62,10 @@
         name: sshd
         state: restarted
 
+    - name: Reload firewalld
+      ansible.builtin.command: firewall-cmd --reload
+      changed_when: false
+
   tasks:
     # ------------------------------------------------------------------
     # 1. SSH hardening (CIS RHEL 9 v2.0.0, section 5.1)
@@ -137,8 +141,10 @@
         zone: public
         target: DROP
         permanent: true
-        immediate: true
         state: present
+      # Zone-level ops are permanent-only in ansible.posix (immediate is
+      # rejected); the handler applies it to the runtime config.
+      notify: Reload firewalld
       tags: [firewall, cis_4.2.1]
 
     # ------------------------------------------------------------------
