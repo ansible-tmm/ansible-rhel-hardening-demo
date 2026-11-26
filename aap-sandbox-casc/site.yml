@@ -1,0 +1,159 @@
+---
+# Config-as-code for the RHEL hardening demo on an AAP sandbox.
+#
+# Recreates every Controller object the demo needs, idempotently:
+#   - Project (SCM from this repo)
+#   - Inventory + target host
+#   - Machine credential (SSH key read from a local file, never committed)
+#   - "apply" and "verify" job templates
+#   - Workflow: pre-flight (check mode + diff) -> approval -> apply -> verify
+#
+# Run from your laptop (localhost) against the Controller API.
+# See README.md for installation and usage.
+
+- name: RHEL hardening demo - controller configuration as code
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  pre_tasks:
+    - name: Fail early if required variables are missing
+      ansible.builtin.assert:
+        that:
+          - controller_hostname is defined
+          - (controller_oauthtoken is defined) or (controller_username is defined and controller_password is defined)
+          - demo_target_ip is defined
+          - demo_ssh_key_path is defined
+        fail_msg: >-
+          Required vars: controller_hostname, controller_oauthtoken (or
+          controller_username + controller_password), demo_target_ip,
+          demo_ssh_key_path. See README.md.
+
+  tasks:
+    # ------------------------------------------------------------------
+    # Project: content comes from source control, update on launch
+    # ------------------------------------------------------------------
+    - name: Create the demo project from this repository
+      ansible.controller.project:
+        name: "RHEL hardening demo"
+        organization: "Default"
+        scm_type: git
+        scm_url: "https://github.com/ansible-tmm/ansible-rhel-hardening-demo.git"
+        scm_branch: main
+        scm_clean: true
+        scm_delete_on_update: true
+        scm_update_on_launch: true
+        wait: true
+        state: present
+
+    # ------------------------------------------------------------------
+    # Inventory and the target host
+    # ------------------------------------------------------------------
+    - name: Create the demo inventory
+      ansible.controller.inventory:
+        name: "RHEL hardening demo"
+        organization: "Default"
+        state: present
+
+    - name: Add the target host
+      ansible.controller.host:
+        name: "rhel9-node1"
+        inventory: "RHEL hardening demo"
+        variables:
+          ansible_host: "{{ demo_target_ip }}"
+          ansible_user: "{{ demo_target_user | default('cloud-user') }}"
+          ansible_python_interpreter: /usr/bin/python3
+          ansible_ssh_common_args: "-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
+        state: present
+
+    # ------------------------------------------------------------------
+    # Machine credential (SSH key from local file, not from git)
+    # ------------------------------------------------------------------
+    - name: Create the machine credential
+      ansible.controller.credential:
+        name: "rhel-hardening-demo - VM key"
+        organization: "Default"
+        credential_type: "Machine"
+        inputs:
+          username: "{{ demo_target_user | default('cloud-user') }}"
+          ssh_key_data: "{{ lookup('file', demo_ssh_key_path) }}"
+        state: present
+      no_log: true
+
+    # ------------------------------------------------------------------
+    # Job templates
+    # ------------------------------------------------------------------
+    - name: Create the apply job template
+      ansible.controller.job_template:
+        name: "RHEL hardening - apply"
+        description: "CIS baseline hardening (Job Tags intentionally EMPTY: run the whole policy)"
+        organization: "Default"
+        project: "RHEL hardening demo"
+        playbook: hardening.yml
+        inventory: "RHEL hardening demo"
+        credentials:
+          - "rhel-hardening-demo - VM key"
+        become_enabled: true
+        # Required so the workflow's pre-flight node can override these
+        ask_job_type_on_launch: true
+        ask_diff_mode_on_launch: true
+        state: present
+
+    - name: Create the verify job template
+      ansible.controller.job_template:
+        name: "RHEL hardening - verify"
+        description: "Read-only CIS audit; exits non-zero on any FAIL"
+        organization: "Default"
+        project: "RHEL hardening demo"
+        playbook: verify.yml
+        inventory: "RHEL hardening demo"
+        credentials:
+          - "rhel-hardening-demo - VM key"
+        become_enabled: true
+        state: present
+
+    # ------------------------------------------------------------------
+    # Workflow: pre-flight (check + diff) -> approval -> apply -> verify
+    # The whole graph is defined inline; success_nodes wires the edges.
+    # ------------------------------------------------------------------
+    - name: Create the workflow with its full graph
+      ansible.controller.workflow_job_template:
+        name: "RHEL hardening - workflow"
+        description: "Pre-flight (check+diff) -> approval -> apply -> CIS verify"
+        organization: "Default"
+        inventory: "RHEL hardening demo"
+        workflow_nodes:
+          - identifier: pre-flight
+            unified_job_template:
+              name: "RHEL hardening - apply"
+              organization:
+                name: Default
+            job_type: check
+            diff_mode: true
+            success_nodes:
+              - approval
+
+          - identifier: approval
+            approval_node:
+              name: "Approve hardening apply"
+              description: "Review the pre-flight diff before the real run"
+              timeout: 0
+            success_nodes:
+              - apply
+
+          - identifier: apply
+            unified_job_template:
+              name: "RHEL hardening - apply"
+              organization:
+                name: Default
+            all_parents_must_converge: true
+            success_nodes:
+              - verify
+
+          - identifier: verify
+            unified_job_template:
+              name: "RHEL hardening - verify"
+              organization:
+                name: Default
+            all_parents_must_converge: true
+        state: present

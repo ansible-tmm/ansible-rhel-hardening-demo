@@ -5,3 +5,6 @@ inventory/inventory.ini
 # Galaxy collections installed locally
 collections/
 galaxy_cache/
+
+# aap-sandbox-casc: SSH keys and local scratch
+aap-sandbox-casc/ssh_key*

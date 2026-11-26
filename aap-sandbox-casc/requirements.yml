@@ -1,0 +1,14 @@
+---
+# ansible.controller ships with AAP and via Red Hat Automation Hub
+# (console.redhat.com). It is NOT on Ansible Galaxy.
+#
+# Install from Automation Hub (requires a hub token):
+#   export ANSIBLE_GALAXY_SERVER_AUTOMATION_HUB_TOKEN=<your hub token>
+#   ansible-galaxy collection install -r requirements.yml
+#
+# No install needed if you run this playbook inside an AAP execution
+# environment: the certified EEs (ee-supported-rhel9 and friends) already
+# bundle ansible.controller. See README.md "Option B" for the bootstrap.
+collections:
+  - name: ansible.controller
+    source: https://console.redhat.com/api/automation-hub/
