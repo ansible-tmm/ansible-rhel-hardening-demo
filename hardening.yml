@@ -134,6 +134,7 @@
         state: disabled
       loop:
         - cockpit
+        - dhcpv6-client
       tags: [firewall, cis_4.2.1]
 
     - name: "CIS 4.2.1 | Set public zone target to DROP (default deny inbound)"
