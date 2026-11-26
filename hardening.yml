@@ -107,13 +107,18 @@
       ansible.builtin.dnf:
         name: firewalld
         state: present
+      register: firewalld_install
       tags: [firewall]
 
+    # In check mode on a host without firewalld, the unit file does not
+    # exist yet (dnf is a no-op), so the runtime tasks below would fail.
+    # Skip them there; run mode always executes (dnf just installed it).
     - name: "CIS 4.2 | Ensure firewalld is enabled and running"
       ansible.builtin.service:
         name: firewalld
         state: started
         enabled: true
+      when: not ansible_check_mode or firewalld_install is not changed
       tags: [firewall]
 
     - name: "CIS 4.2.1 | Ensure SSH service is allowed in the public zone"
@@ -123,6 +128,7 @@
         permanent: true
         immediate: true
         state: enabled
+      when: not ansible_check_mode or firewalld_install is not changed
       tags: [firewall, cis_4.2.1]
 
     - name: "CIS 4.2.1 | Remove unnecessary services from the public zone"
@@ -135,6 +141,7 @@
       loop:
         - cockpit
         - dhcpv6-client
+      when: not ansible_check_mode or firewalld_install is not changed
       tags: [firewall, cis_4.2.1]
 
     - name: "CIS 4.2.1 | Set public zone target to DROP (default deny inbound)"
@@ -143,6 +150,7 @@
         target: DROP
         permanent: true
         state: present
+      when: not ansible_check_mode or firewalld_install is not changed
       # Zone-level ops are permanent-only in ansible.posix (immediate is
       # rejected); the handler applies it to the runtime config.
       notify: Reload firewalld
