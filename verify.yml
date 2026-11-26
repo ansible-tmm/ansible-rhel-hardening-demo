@@ -77,8 +77,8 @@
       vars:
         effective_ciphers: >-
           {{ (sshd_effective.stdout
-              | regex_search('(?m)^ciphers (.+)$', '\\1')
-              | default('')) | trim }}
+              | regex_search('(?m)^ciphers (.+)$')
+              | default('')) | regex_replace('^ciphers\s*', '') | trim }}
         check:
           control: "5.1.4"
           description: "sshd ciphers match the approved list"
