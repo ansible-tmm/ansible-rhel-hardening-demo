@@ -150,9 +150,18 @@
     # ------------------------------------------------------------------
     # 3. Password policies (CIS RHEL 9 v2.0.0, sections 5.3 and 5.4)
     # ------------------------------------------------------------------
+    - name: "CIS 5.3.3.2 | Ensure pwquality drop-in directory exists"
+      ansible.builtin.file:
+        dest: /etc/security/pwquality.conf.d
+        owner: root
+        group: root
+        mode: "0755"
+        state: directory
+      tags: [password_policy, cis_5.3.3.2.2, cis_5.3.3.2.3, cis_5.3.3.2.4]
+
     - name: "CIS 5.3.3.2 | Deploy password quality drop-in (pam_pwquality)"
       ansible.builtin.copy:
-        dest: /etc/security/pwquality.d/99-hardening.conf
+        dest: /etc/security/pwquality.conf.d/99-hardening.conf
         owner: root
         group: root
         mode: "0644"

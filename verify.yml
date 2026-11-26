@@ -156,7 +156,7 @@
     # ---------------- Password policies (CIS sections 5.3, 5.4) ----------------
     - name: "CIS 5.3.3.2 | Read password quality drop-in"
       ansible.builtin.command:
-        cmd: grep -E "^(minlen|minclass|maxrepeat)\s*=" /etc/security/pwquality.d/99-hardening.conf
+        cmd: grep -E "^(minlen|minclass|maxrepeat)\s*=" /etc/security/pwquality.conf.d/99-hardening.conf
       changed_when: false
       check_mode: false
       failed_when: false
